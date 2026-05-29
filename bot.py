@@ -78,7 +78,7 @@ def filter_pricing(query_text, max_items=50):
                 score += 1
         if score > 0:
             scored.append((score, item))
-    scored.sort(reverse=True)
+    scored.sort(key=lambda x: x[0], reverse=True)
     result = [item for _, item in scored[:max_items]]
     if not result:
         result = PRICING_DATA[:max_items]

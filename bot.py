@@ -26,7 +26,7 @@ def load_all_pricing():
     for filepath in xlsx_files:
         service_name = os.path.basename(filepath).replace("Export-Pricing-Table-", "").replace(".xlsx", "").replace("_", " ").replace("(1)", "").strip()
         try:
-            df = pd.read_excel(filepath, sheet_name="Items", header=1)
+            df = pd.read_excel(filepath, sheet_name="Items", header=1, skiprows=[2])
             df = df.dropna(subset=["Name"])
             for _, row in df.iterrows():
                 name = str(row.get("Name", "")).strip()

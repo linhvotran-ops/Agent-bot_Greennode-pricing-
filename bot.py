@@ -11,7 +11,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, fil
 from flask import Flask
 import threading
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -25,29 +25,23 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 def load_all_pricing():
     all_items = []
     xlsx_files = glob.glob("/app/data/*.xlsx")
-    logger.info(f"Found {len(xlsx_files)} xlsx files: {xlsx_files}")
+    logger.info(f"Found {len(xlsx_files)} xlsx files")
 
     for filepath in xlsx_files:
         if "pricing.xlsx" in filepath:
             continue
         service_name = os.path.basename(filepath).replace("Export-Pricing-Table-", "").replace(".xlsx", "").strip()
         try:
-            # Đọc thử để tìm đúng header row
             df_raw = pd.read_excel(filepath, sheet_name="Items", header=None, nrows=5)
-            logger.info(f"{filepath} first rows: {df_raw.values.tolist()}")
-            
-            # Tìm row chứa "Name"
             header_row = 0
             for i, row in df_raw.iterrows():
                 if "Name" in row.values:
                     header_row = i
                     break
-            
             df = pd.read_excel(filepath, sheet_name="Items", header=header_row)
             df = df.dropna(subset=["Name"])
             df = df[df["Name"].astype(str).str.strip() != ""]
             df = df[df["Name"].astype(str).str.strip() != "nan"]
-            
             count = 0
             for _, row in df.iterrows():
                 name = str(row.get("Name", "")).strip()
@@ -67,49 +61,64 @@ def load_all_pricing():
             logger.info(f"Loaded {count} items from {service_name}")
         except Exception as e:
             logger.error(f"Error loading {filepath}: {e}")
-            logger.error(traceback.format_exc())
 
-    logger.info(f"Total loaded: {len(all_items)} items from {len(xlsx_files)} files")
+    logger.info(f"Total: {len(all_items)} items")
     return all_items
 
 PRICING_DATA = load_all_pricing()
-PRICING_JSON = json.dumps(PRICING_DATA, ensure_ascii=False)
 
-SYSTEM_PROMPT = f"""Bạn là trợ lý tư vấn báo giá của Greennode/VNG Cloud. Nhiệm vụ:
-1. Phân tích nhu cầu khách hàng (từ text hoặc hình ảnh)
+def filter_pricing(query_text, max_items=50):
+    keywords = query_text.lower().split()
+    scored = []
+    for item in PRICING_DATA:
+        score = 0
+        text = (item["name"] + " " + item["description"] + " " + item["service"] + " " + item["item_group"]).lower()
+        for kw in keywords:
+            if kw in text:
+                score += 1
+        if score > 0:
+            scored.append((score, item))
+    scored.sort(reverse=True)
+    result = [item for _, item in scored[:max_items]]
+    if not result:
+        result = PRICING_DATA[:max_items]
+    return json.dumps(result, ensure_ascii=False)
+
+SYSTEM_BASE = """Bạn là trợ lý tư vấn báo giá của Greennode/VNG Cloud. Nhiệm vụ:
+1. Phân tích nhu cầu khách hàng
 2. Tìm cấu hình phù hợp nhất từ bảng giá
-3. Trả lời ĐÚNG theo template sau:
+3. Trả lời ĐÚNG theo template:
 
-* Nhu cầu: [mô tả nhu cầu của khách]
-* Cấu hình/solution: [tên cấu hình + thông số kỹ thuật + service]
+* Nhu cầu: [mô tả nhu cầu]
+* Cấu hình/solution: [tên cấu hình + thông số + service]
 * Total giá: [giá + đơn vị + VAT]
 
-BẢNG GIÁ (JSON):
-{PRICING_JSON}
-
 Quy tắc:
-- Ưu tiên item có status "Active"
 - Giá VND: hiển thị có dấu phẩy, ví dụ 76,416,211 VND/tháng
-- Giá USD: hiển thị theo đơn vị gốc
-- Nếu không tìm thấy chính xác, đề xuất cấu hình gần nhất
-- Luôn ghi rõ tên service (AI Cloud, vServer, vStorage, vCDN, vMonitor, AI Base, AI MaaS)"""
+- Giá USD: theo đơn vị gốc
+- Nếu không tìm thấy chính xác, đề xuất gần nhất
+- Ghi rõ tên service
+
+BẢNG GIÁ LIÊN QUAN:
+{pricing}"""
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     await update.message.reply_text("⏳ Đang tra cứu báo giá...")
     try:
+        pricing = filter_pricing(user_text)
+        system_prompt = SYSTEM_BASE.format(pricing=pricing)
         response = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=1000,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             messages=[{"role": "user", "content": user_text}]
         )
         reply = response.content[0].text
         await update.message.reply_text(reply)
     except Exception as e:
-        logger.error(f"Error in handle_text: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error: {e}\n{traceback.format_exc()}")
         await update.message.reply_text(f"❌ Lỗi: {str(e)[:200]}")
 
 
@@ -120,12 +129,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(photo.file_id)
         file_bytes = await file.download_as_bytearray()
         image_b64 = base64.b64encode(file_bytes).decode("utf-8")
-        caption = update.message.caption or "Phân tích hình ảnh này và báo giá phù hợp."
+        caption = update.message.caption or "Phân tích hình ảnh và báo giá phù hợp."
+
+        pricing = filter_pricing(caption)
+        system_prompt = SYSTEM_BASE.format(pricing=pricing)
 
         response = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=1000,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             messages=[{
                 "role": "user",
                 "content": [
@@ -137,16 +149,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = response.content[0].text
         await update.message.reply_text(reply)
     except Exception as e:
-        logger.error(f"Error in handle_photo: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error: {e}\n{traceback.format_exc()}")
         await update.message.reply_text(f"❌ Lỗi: {str(e)[:200]}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Xin chào! Tôi là bot báo giá Greennode/VNG Cloud.\n\n"
-        f"📦 Đã load {len(PRICING_DATA)} sản phẩm từ bảng giá.\n\n"
-        "💬 Gõ nhu cầu hoặc gửi ảnh yêu cầu để tôi báo giá! 🚀"
+        f"📦 Đã load {len(PRICING_DATA)} sản phẩm.\n\n"
+        "💬 Gõ nhu cầu hoặc gửi ảnh để báo giá! 🚀"
     )
 
 app = Flask(__name__)
@@ -161,12 +172,10 @@ def run_flask():
 def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
     logger.info("Bot started!")
     application.run_polling()
 

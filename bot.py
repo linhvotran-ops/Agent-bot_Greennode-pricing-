@@ -19,14 +19,17 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 def load_all_pricing():
-    """Load tất cả file xlsx trong thư mục /app/data/"""
     all_items = []
     xlsx_files = glob.glob("/app/data/*.xlsx")
     
     for filepath in xlsx_files:
-        service_name = os.path.basename(filepath).replace("Export-Pricing-Table-", "").replace(".xlsx", "").replace("_", " ").replace("(1)", "").strip()
+        service_name = os.path.basename(filepath).replace("Export-Pricing-Table-", "").replace(".xlsx", "").strip()
         try:
-           df = pd.read_excel(filepath, sheet_name="Items", header=0, skiprows=[1])
+            # Thử đọc với header=1 (bỏ dòng đầu)
+            df = pd.read_excel(filepath, sheet_name="Items", header=1)
+            # Nếu không có cột Name, thử header=0
+            if "Name" not in df.columns:
+                df = pd.read_excel(filepath, sheet_name="Items", header=0)
             df = df.dropna(subset=["Name"])
             for _, row in df.iterrows():
                 name = str(row.get("Name", "")).strip()
@@ -41,7 +44,6 @@ def load_all_pricing():
                     "vat": row.get("% VAT", 0),
                     "currency": str(row.get("Currency", "VND")).strip(),
                     "item_group": str(row.get("Item Group", "")).strip(),
-                    "status": str(row.get("Status", "")).strip(),
                 })
         except Exception as e:
             logger.error(f"Error loading {filepath}: {e}")
